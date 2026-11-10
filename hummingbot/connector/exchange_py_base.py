@@ -2,6 +2,7 @@ import asyncio
 import copy
 import logging
 import math
+import re
 from abc import ABC, abstractmethod
 from decimal import Decimal
 from typing import Any, AsyncIterable, Callable, Dict, List, Optional, Tuple
@@ -388,11 +389,12 @@ class ExchangePyBase(ExchangeBase, ABC):
                     if client_order_id is not None:
                         order_id_set.remove(client_order_id)
                         successful_cancellations.append(CancellationResult(client_order_id, True))
-        except Exception:
+        except Exception as cancel_error:
+            order_ids = ",".join(sorted(order_id_set))
             self.logger().network(
                 "Unexpected error cancelling orders.",
                 exc_info=True,
-                app_warning_msg="Failed to cancel order. Check API key and network connection."
+                app_warning_msg=self._visible_refusal(cancel_error, order_ids, "cancel"),
             )
         failed_cancellations = [CancellationResult(oid, False) for oid in order_id_set]
         return successful_cancellations + failed_cancellations
@@ -497,6 +499,19 @@ class ExchangePyBase(ExchangeBase, ABC):
 
         return exchange_order_id
 
+    _SECRET_FIELD = re.compile(
+        r"(?i)[\"']?(api[_-]?key|passphrase|secret|signature|sign|authorization|body)[\"']?"
+        r"(\s*[:=]\s*)"
+        r"(\"[^\"]*\"|'[^']*'|\{[^{}]*\}|\S+)",
+    )
+
+    def _visible_refusal(self, exception: BaseException, order_id: str, action: str) -> str:
+        text = self._SECRET_FIELD.sub(r"\1\2[redacted]", str(exception))
+        text = re.sub(r"\s+", " ", text).strip()
+        if len(text) > 180:
+            text = text[:180]
+        return f"Failed to {action} order {order_id}. {type(exception).__name__}: {text}"
+
     def _on_order_failure(
         self,
         order_id: str,
@@ -512,7 +527,9 @@ class ExchangePyBase(ExchangeBase, ABC):
             f"Error submitting {trade_type.name.lower()} {order_type.name.upper()} order to {self.name_cap} for "
             f"{amount} {trading_pair} {price}.",
             exc_info=True,
-            app_warning_msg=f"Failed to submit {trade_type.name.upper()} order to {self.name_cap}. Check API key and network connection."
+            app_warning_msg=self._visible_refusal(
+                exception, order_id, f"submit {trade_type.name.upper()}",
+            ),
         )
         self._update_order_after_failure(order_id=order_id, trading_pair=trading_pair, exception=exception)
 
