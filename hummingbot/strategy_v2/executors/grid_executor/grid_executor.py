@@ -302,11 +302,17 @@ class GridExecutor(ExecutorBase):
         completed = self.levels_by_state[GridLevelStates.COMPLETE]
         # Get completed orders and store them in the filled orders list
         for level in completed:
-            if level.active_open_order.order.completely_filled_event.is_set() and level.active_close_order.order.completely_filled_event.is_set():
-                open_order = level.active_open_order.order.to_json()
-                close_order = level.active_close_order.order.to_json()
-                self._filled_orders.append(open_order)
-                self._filled_orders.append(close_order)
+            open_tracked = level.active_open_order
+            close_tracked = level.active_close_order
+            open_order = open_tracked.order if open_tracked is not None else None
+            close_order = close_tracked.order if close_tracked is not None else None
+            if open_order is None or close_order is None:
+                continue
+            if open_order.completely_filled_event.is_set() and close_order.completely_filled_event.is_set():
+                open_order_json = open_order.to_json()
+                close_order_json = close_order.to_json()
+                self._filled_orders.append(open_order_json)
+                self._filled_orders.append(close_order_json)
                 self.levels_by_state[GridLevelStates.COMPLETE].remove(level)
                 level.reset_level()
                 self.levels_by_state[GridLevelStates.NOT_ACTIVE].append(level)
@@ -835,29 +841,35 @@ class GridExecutor(ExecutorBase):
         open_filled_levels = self.levels_by_state[GridLevelStates.OPEN_ORDER_FILLED] + self.levels_by_state[
             GridLevelStates.CLOSE_ORDER_PLACED]
         side_multiplier = 1 if self.config.side == TradeType.BUY else -1
-        executed_amount_base = Decimal(sum([level.active_open_order.order.amount for level in open_filled_levels]))
+        priced_levels = [
+            level for level in open_filled_levels
+            if level.active_open_order is not None and level.active_open_order.order is not None
+        ]
+        executed_amount_base = Decimal(sum([
+            level.active_open_order.order.amount for level in priced_levels]))
         if executed_amount_base == Decimal("0"):
             self.position_size_base = Decimal("0")
             self.position_size_quote = Decimal("0")
             self.position_fees_quote = Decimal("0")
             self.position_pnl_quote = Decimal("0")
             self.position_pnl_pct = Decimal("0")
-            self.close_liquidity_placed = Decimal("0")
         else:
             self.position_break_even_price = sum(
                 [level.active_open_order.order.price * level.active_open_order.order.amount
-                 for level in open_filled_levels]) / executed_amount_base
+                 for level in priced_levels]) / executed_amount_base
             if self._open_fee_in_base:
-                executed_amount_base -= sum([level.active_open_order.cum_fees_base for level in open_filled_levels])
+                executed_amount_base -= sum([level.active_open_order.cum_fees_base for level in priced_levels])
             close_order_size_base = self._close_order.executed_amount_base if self._close_order and self._close_order.is_done else Decimal(
                 "0")
             self.position_size_base = executed_amount_base - close_order_size_base
             self.position_size_quote = self.position_size_base * self.position_break_even_price
-            self.position_fees_quote = Decimal(sum([level.active_open_order.cum_fees_quote for level in open_filled_levels]))
+            self.position_fees_quote = Decimal(sum([level.active_open_order.cum_fees_quote for level in priced_levels]))
             self.position_pnl_quote = side_multiplier * ((self.mid_price - self.position_break_even_price) / self.position_break_even_price) * self.position_size_quote - self.position_fees_quote
             self.position_pnl_pct = self.position_pnl_quote / self.position_size_quote if self.position_size_quote > 0 else Decimal(
                 "0")
-            self.close_liquidity_placed = sum([level.amount_quote for level in self.levels_by_state[GridLevelStates.CLOSE_ORDER_PLACED] if level.active_close_order and level.active_close_order.executed_amount_base == Decimal("0")])
+        self.close_liquidity_placed = sum([
+            level.amount_quote for level in self.levels_by_state[GridLevelStates.CLOSE_ORDER_PLACED]
+            if level.active_close_order and level.active_close_order.executed_amount_base == Decimal("0")])
         if len(self.levels_by_state[GridLevelStates.OPEN_ORDER_PLACED]) > 0:
             self.open_liquidity_placed = sum([level.amount_quote for level in self.levels_by_state[GridLevelStates.OPEN_ORDER_PLACED] if level.active_open_order and level.active_open_order.executed_amount_base == Decimal("0")])
         else:
